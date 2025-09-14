@@ -1,9 +1,10 @@
-# app.py
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from joblib import load
 from pathlib import Path
+import os
 import pandas as pd
 
 app = FastAPI(title="Stroke Risk Predictor")
@@ -15,7 +16,9 @@ app.add_middleware(
     allow_headers=["*"]
 )
 
-ARTIFACT = None  # {'model': Pipeline, 'features': [...]}
+
+THRESHOLD = float(os.getenv("THRESHOLD", "0.5"))  
+ARTIFACT = None  
 
 @app.on_event("startup")
 def load_model():
@@ -25,7 +28,6 @@ def load_model():
     if not (isinstance(ARTIFACT, dict) and "model" in ARTIFACT and "features" in ARTIFACT):
         raise RuntimeError("Artifact inválido: faltan 'model' y/o 'features'.")
 
-# Entrada con campos crudos (como en el CSV)
 class Input(BaseModel):
     Age: float
     Gender: str             # "Male" | "Female"
@@ -35,12 +37,13 @@ class Input(BaseModel):
     BMI: float
     Avg_Glucose: float
     Diabetes: int           # 0/1
-    Smoking_Status: str     # "Never" | "Current" | "Former"
+    Smoking_Status: str     
 
-class Output(BaseModel):
-    score: float            # probabilidad de Stroke=1
 
-@app.post("/score", response_model=Output)
+class LabelOutput(BaseModel):
+    label: int
+
+@app.post("/score", response_model=LabelOutput)
 def score(data: Input):
     if ARTIFACT is None:
         raise HTTPException(500, "Modelo no cargado")
@@ -48,16 +51,19 @@ def score(data: Input):
     model = ARTIFACT["model"]
     feats = ARTIFACT["features"]
 
-    # DataFrame de UNA fila con los campos crudos
     payload = data.model_dump() if hasattr(data, "model_dump") else data.dict()
     df = pd.DataFrame([payload])
-    
-
-    # Asegura columnas y orden crudo esperado (pipeline se encarga del OneHot y escalado)
     X = df.reindex(columns=feats)
 
     try:
-        proba = float(model.predict_proba(X)[:, 1][0])  # prob Stroke=1
-        return {"score": proba}
+        
+        if hasattr(model, "predict_proba"):
+            proba = float(model.predict_proba(X)[:, 1][0])  
+            label = 1 if proba >= THRESHOLD else 0
+            return {"label": label}
+        
+        pred = int(model.predict(X)[0])
+        return {"label": pred}
     except Exception as e:
         raise HTTPException(500, detail=f"Inference error: {type(e).__name__}: {e}")
+
